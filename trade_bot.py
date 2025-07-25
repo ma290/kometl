@@ -8,7 +8,7 @@ from decimal import Decimal
 from dotenv import load_dotenv
 from binance import AsyncClient, BinanceSocketManager
 from datetime import datetime
-from aiohttp import web  # Added for HTTP server
+from aiohttp import web
 
 load_dotenv()
 
@@ -160,8 +160,11 @@ async def exit_trade(client, reason):
 
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
-    async with BinanceSocketManager(client).symbol_mark_price_socket(SYMBOL.upper()) as stream:
-        async for msg in stream:
+    bsm = BinanceSocketManager(client)
+    socket = bsm.mark_price_socket(SYMBOL.upper())
+    async with socket as stream:
+        while True:
+            msg = await stream.recv()
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
@@ -219,9 +222,9 @@ async def trade_handler(client):
         await asyncio.sleep(1)
 
 
-# Minimal HTTP server to keep container alive
 async def handle_http(_):
     return web.Response(text="Bot is alive.")
+
 
 async def start_http_server():
     app = web.Application()
@@ -244,5 +247,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
