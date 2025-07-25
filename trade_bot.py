@@ -1,4 +1,4 @@
-# trade_bot.py (Fixed with HTTP server and ping URL support)
+# trade_bot.py
 import os
 import asyncio
 import json
@@ -8,7 +8,7 @@ from decimal import Decimal
 from dotenv import load_dotenv
 from binance import AsyncClient, BinanceSocketManager
 from datetime import datetime
-from aiohttp import web
+from aiohttp import web  # Added for HTTP server
 
 load_dotenv()
 
@@ -50,18 +50,6 @@ async def ping_url():
         except Exception as e:
             print(f"Ping error: {e}")
         await asyncio.sleep(300)
-
-
-async def http_server():
-    async def handle(request):
-        return web.Response(text="Trade bot is running.")
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("HTTP server running at http://localhost:8080")
 
 
 def compute_rsi(closes, period):
@@ -177,15 +165,13 @@ async def price_monitor(client):
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
-                    # Trailing SL logic
+                    offset = entry_price * (trail_offset_pct / 100)
                     if trail_active:
-                        offset = entry_price * (trail_offset_pct / 100)
                         if open_side == "BUY" and price - offset > sl_price:
                             sl_price = price - offset
                         elif open_side == "SELL" and price + offset < sl_price:
                             sl_price = price + offset
 
-                    # Breakeven logic
                     if breakeven_active:
                         buffer = entry_price * 0.002
                         if open_side == "BUY" and price >= entry_price + buffer:
@@ -195,7 +181,6 @@ async def price_monitor(client):
                             sl_price = entry_price
                             breakeven_active = False
 
-                    # Exit condition
                     if open_side == "BUY" and (price <= sl_price or price >= tp_price):
                         await exit_trade(client, "SL/TP HIT")
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
@@ -234,15 +219,29 @@ async def trade_handler(client):
         await asyncio.sleep(1)
 
 
+# Minimal HTTP server to keep container alive
+async def handle_http(_):
+    return web.Response(text="Bot is alive.")
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", handle_http)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+
+
 async def main():
     client = await AsyncClient.create(API_KEY, API_SECRET, testnet=True)
     await asyncio.gather(
-        http_server(),
         ping_url(),
         candle_collector(),
         trade_handler(client),
         price_monitor(client),
+        start_http_server(),
     )
 
 if __name__ == "__main__":
     asyncio.run(main())
+
