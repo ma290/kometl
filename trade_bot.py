@@ -1,3 +1,4 @@
+```python
 # trade_bot.py
 import os
 import asyncio
@@ -35,6 +36,9 @@ position_open = False
 open_side = None
 sl_price = None
 tp_price = None
+entry_price = None
+trail_active = False
+breakeven_active = False
 
 
 async def ping_url():
@@ -86,7 +90,6 @@ def calc_trade_logic():
     lower_wick = min(open_, close) - low
     rsi = compute_rsi(closes, rsi_period)
     ema_val = ema(closes, ema_period)
-    trail_points = close * (trail_offset_pct / 100)
 
     is_bull = close > open_
     body_strong_bull = body > avg_body * body_strength_mult
@@ -109,16 +112,16 @@ def calc_trade_logic():
     if bull_confluence:
         sl = low - body
         tp = close + body * risk_reward_ratio
-        return "BUY", sl, tp
+        return "BUY", sl, tp, close
     elif bear_confluence:
         sl = high + body
         tp = close - body * risk_reward_ratio
-        return "SELL", sl, tp
+        return "SELL", sl, tp, close
     return None
 
 
-async def order_side(client, side, sl, tp):
-    global position_open, open_side, sl_price, tp_price
+async def order_side(client, side, sl, tp, entry):
+    global position_open, open_side, sl_price, tp_price, entry_price, trail_active, breakeven_active
     try:
         print(f"Placing {side} order...")
         order = await client.futures_create_order(
@@ -132,6 +135,9 @@ async def order_side(client, side, sl, tp):
         open_side = side
         sl_price = sl
         tp_price = tp
+        entry_price = entry
+        trail_active = True
+        breakeven_active = True
     except Exception as e:
         print(f"Order Error: {e}")
 
@@ -156,12 +162,31 @@ async def exit_trade(client, reason):
 
 
 async def price_monitor(client):
-    global sl_price, tp_price
+    global sl_price, tp_price, trail_active, breakeven_active
     async with BinanceSocketManager(client).symbol_mark_price_socket(SYMBOL.upper()) as stream:
         async for msg in stream:
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
+                    # Trailing SL logic
+                    if trail_active:
+                        offset = entry_price * (trail_offset_pct / 100)
+                        if open_side == "BUY" and price - offset > sl_price:
+                            sl_price = price - offset
+                        elif open_side == "SELL" and price + offset < sl_price:
+                            sl_price = price + offset
+
+                    # Breakeven logic
+                    if breakeven_active:
+                        buffer = entry_price * 0.002
+                        if open_side == "BUY" and price >= entry_price + buffer:
+                            sl_price = entry_price
+                            breakeven_active = False
+                        elif open_side == "SELL" and price <= entry_price - buffer:
+                            sl_price = entry_price
+                            breakeven_active = False
+
+                    # Exit condition
                     if open_side == "BUY" and (price <= sl_price or price >= tp_price):
                         await exit_trade(client, "SL/TP HIT")
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
@@ -195,8 +220,8 @@ async def trade_handler(client):
         if not position_open:
             signal = calc_trade_logic()
             if signal:
-                side, sl, tp = signal
-                await order_side(client, side, sl, tp)
+                side, sl, tp, entry = signal
+                await order_side(client, side, sl, tp, entry)
         await asyncio.sleep(1)
 
 
@@ -211,3 +236,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+```
