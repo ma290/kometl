@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY . /app
 
-RUN pip install --no-cache-dir python-binance python-dotenv requests aiohttp websockets
+RUN pip install --no-cache-dir "python-binance[async]" python-dotenv requests aiohttp websockets
 
 EXPOSE 8080
 
