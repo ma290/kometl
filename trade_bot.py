@@ -1,11 +1,11 @@
 import os
 import asyncio
+import json
 import aiohttp
 from dotenv import load_dotenv
 from binance import AsyncClient, BinanceSocketManager
 from datetime import datetime
 from aiohttp import web
-import traceback
 
 load_dotenv()
 
@@ -36,18 +36,16 @@ entry_price = None
 trail_active = False
 breakeven_active = False
 
-session = None  # Global session to avoid memory leak
-
-
 async def ping_url():
-    while True:
-        try:
-            async with session.get(PING_URL) as resp:
-                print(f"[{datetime.now()}] Ping sent: {resp.status}")
-        except Exception as e:
-            print(f"Ping error: {e}")
-        await asyncio.sleep(300)
-
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while True:
+            try:
+                async with session.get(PING_URL) as resp:
+                    print(f"[{datetime.now()}] Ping sent: {resp.status}")
+            except Exception as e:
+                print(f"Ping error: {e}")
+            await asyncio.sleep(300)
 
 def compute_rsi(closes, period):
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
@@ -58,14 +56,12 @@ def compute_rsi(closes, period):
     rs = avg_gain / avg_loss if avg_loss != 0 else 0
     return 100 - (100 / (1 + rs))
 
-
 def ema(values, period):
     multiplier = 2 / (period + 1)
     ema_vals = [sum(values[:period]) / period]
     for price in values[period:]:
         ema_vals.append((price - ema_vals[-1]) * multiplier + ema_vals[-1])
     return ema_vals[-1]
-
 
 def calc_trade_logic():
     if len(candles) < max(rsi_period + 1, ema_period):
@@ -88,23 +84,23 @@ def calc_trade_logic():
     rsi = compute_rsi(closes, rsi_period)
     ema_val = ema(closes, ema_period)
 
-    bull_confluence = all([
-        close > open_,
-        body > avg_body * body_strength_mult,
-        volume > avg_vol * volume_strength_mult,
-        upper_wick < body * 0.25,
-        rsiBuyMin <= rsi <= rsiBuyMax,
-        close > ema_val
-    ])
+    is_bull = close > open_
+    body_strong_bull = body > avg_body * body_strength_mult
+    vol_strong_bull = volume > avg_vol * volume_strength_mult
+    low_upper_wick = upper_wick < body * 0.25
+    rsi_ok_bull = rsiBuyMin <= rsi <= rsiBuyMax
+    ema_ok_bull = close > ema_val
 
-    bear_confluence = all([
-        close < open_,
-        body > avg_body * body_strength_mult,
-        volume > avg_vol * volume_strength_mult,
-        lower_wick < body * 0.25,
-        rsiSellMin <= rsi <= rsiSellMax,
-        close < ema_val
-    ])
+    bull_confluence = all([is_bull, body_strong_bull, vol_strong_bull, low_upper_wick, rsi_ok_bull, ema_ok_bull])
+
+    is_bear = close < open_
+    body_strong_bear = body > avg_body * body_strength_mult
+    vol_strong_bear = volume > avg_vol * volume_strength_mult
+    low_lower_wick = lower_wick < body * 0.25
+    rsi_ok_bear = rsiSellMin <= rsi <= rsiSellMax
+    ema_ok_bear = close < ema_val
+
+    bear_confluence = all([is_bear, body_strong_bear, vol_strong_bear, low_lower_wick, rsi_ok_bear, ema_ok_bear])
 
     if bull_confluence:
         sl = low - body
@@ -115,7 +111,6 @@ def calc_trade_logic():
         tp = close - body * risk_reward_ratio
         return "SELL", sl, tp, close
     return None
-
 
 async def order_side(client, side, sl, tp, entry):
     global position_open, open_side, sl_price, tp_price, entry_price, trail_active, breakeven_active
@@ -135,9 +130,8 @@ async def order_side(client, side, sl, tp, entry):
         entry_price = entry
         trail_active = True
         breakeven_active = True
-    except Exception:
-        traceback.print_exc()
-
+    except Exception as e:
+        print(f"Order Error: {e}")
 
 async def exit_trade(client, reason):
     global position_open, open_side
@@ -151,9 +145,8 @@ async def exit_trade(client, reason):
         )
         print(f"Exited trade due to {reason}. Order: {order}")
         position_open = False
-    except Exception:
-        traceback.print_exc()
-
+    except Exception as e:
+        print(f"Exit Error: {e}")
 
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
@@ -161,71 +154,65 @@ async def price_monitor(client):
     async with bsm.mark_price_socket(SYMBOL.upper()) as stream:
         async for msg in stream:
             try:
-                if "p" in msg:
-                    price = float(msg["p"])
-                    if position_open:
-                        offset = entry_price * (trail_offset_pct / 100)
-                        if trail_active:
-                            if open_side == "BUY" and price - offset > sl_price:
-                                sl_price = price - offset
-                            elif open_side == "SELL" and price + offset < sl_price:
-                                sl_price = price + offset
+                price = float(msg["p"])
+                if position_open:
+                    offset = entry_price * (trail_offset_pct / 100)
+                    if trail_active:
+                        if open_side == "BUY" and price - offset > sl_price:
+                            sl_price = price - offset
+                        elif open_side == "SELL" and price + offset < sl_price:
+                            sl_price = price + offset
 
-                        if breakeven_active:
-                            buffer = entry_price * 0.002
-                            if open_side == "BUY" and price >= entry_price + buffer:
-                                sl_price = entry_price
-                                breakeven_active = False
-                            elif open_side == "SELL" and price <= entry_price - buffer:
-                                sl_price = entry_price
-                                breakeven_active = False
+                    if breakeven_active:
+                        buffer = entry_price * 0.002
+                        if open_side == "BUY" and price >= entry_price + buffer:
+                            sl_price = entry_price
+                            breakeven_active = False
+                        elif open_side == "SELL" and price <= entry_price - buffer:
+                            sl_price = entry_price
+                            breakeven_active = False
 
-                        if open_side == "BUY" and (price <= sl_price or price >= tp_price):
-                            await exit_trade(client, "SL/TP HIT")
-                        elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
-                            await exit_trade(client, "SL/TP HIT")
-                await asyncio.sleep(0)
-            except Exception:
-                traceback.print_exc()
+                    if open_side == "BUY" and (price <= sl_price or price >= tp_price):
+                        await exit_trade(client, "SL/TP HIT")
+                    elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
+                        await exit_trade(client, "SL/TP HIT")
+            except Exception as e:
+                print(f"Monitor Error: {e}")
 
+            await asyncio.sleep(0)
 
 async def candle_collector():
-    while True:
-        try:
-            url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=1m&limit=100"
-            async with session.get(url) as res:
-                data = await res.json()
-                candles.clear()
-                for c in data:
-                    candles.append({
-                        "time": c[0],
-                        "open": float(c[1]),
-                        "high": float(c[2]),
-                        "low": float(c[3]),
-                        "close": float(c[4]),
-                        "volume": float(c[5])
-                    })
-        except Exception:
-            traceback.print_exc()
-        await asyncio.sleep(1)
-
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while True:
+            try:
+                async with session.get(f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=1m&limit=100") as res:
+                    data = await res.json()
+                    candles.clear()
+                    for c in data:
+                        candles.append({
+                            "time": c[0],
+                            "open": float(c[1]),
+                            "high": float(c[2]),
+                            "low": float(c[3]),
+                            "close": float(c[4]),
+                            "volume": float(c[5])
+                        })
+            except Exception as e:
+                print(f"Candle fetch error: {e}")
+            await asyncio.sleep(1)
 
 async def trade_handler(client):
     while True:
-        try:
-            if not position_open:
-                signal = calc_trade_logic()
-                if signal:
-                    side, sl, tp, entry = signal
-                    await order_side(client, side, sl, tp, entry)
-        except Exception:
-            traceback.print_exc()
+        if not position_open:
+            signal = calc_trade_logic()
+            if signal:
+                side, sl, tp, entry = signal
+                await order_side(client, side, sl, tp, entry)
         await asyncio.sleep(1)
-
 
 async def handle_http(_):
     return web.Response(text="Bot is alive.")
-
 
 async def start_http_server():
     app = web.Application()
@@ -235,10 +222,7 @@ async def start_http_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
 
-
 async def main():
-    global session
-    session = aiohttp.ClientSession()
     client = await AsyncClient.create(API_KEY, API_SECRET, testnet=True)
     try:
         await asyncio.gather(
@@ -249,9 +233,7 @@ async def main():
             start_http_server(),
         )
     finally:
-        await session.close()
         await client.close_connection()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
