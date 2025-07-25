@@ -160,11 +160,8 @@ async def exit_trade(client, reason):
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
     bsm = BinanceSocketManager(client)
-    socket = await bsm.mark_price_socket(SYMBOL.upper())
-    await socket.__aenter__()
-    try:
-        while True:
-            msg = await socket.recv()
+    async with bsm.mark_price_socket(SYMBOL.upper()) as socket:
+        async for msg in socket:
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
@@ -188,8 +185,6 @@ async def price_monitor(client):
                         await exit_trade(client, "SL/TP HIT")
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
                         await exit_trade(client, "SL/TP HIT")
-    finally:
-        await socket.__aexit__(None, None, None)
 
 
 async def candle_collector():
