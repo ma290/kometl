@@ -2,23 +2,23 @@ import os
 import time
 import threading
 import requests
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from binance.client import Client
 from binance.enums import *
 from dotenv import load_dotenv
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Load .env
 load_dotenv()
-
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
-PING_URL = os.getenv("PING_URL")
+PING_URL = os.getenv("PING_URL")  # Optional
 
-# Binance Futures Testnet
+# Binance Testnet client
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
 
-# Strategy config
+# Strategy params
 LOT_SIZE = 0.03
 RSI_PERIOD = 14
 EMA_PERIOD = 50
@@ -27,9 +27,36 @@ BODY_STRENGTH = 2.0
 TRAIL_PERCENT = 0.5 / 100
 RR = 2.0
 
+# Global trade state
+open_trade = None
+
+# HTTP Server for uptime (optional)
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
+
+def start_http_server():
+    server = HTTPServer(('0.0.0.0', 8080), PingHandler)
+    server.serve_forever()
+
+# Periodic ping
+def start_pinger():
+    while True:
+        if PING_URL:
+            try:
+                requests.get(PING_URL)
+                print("[Ping] Sent to", PING_URL)
+            except:
+                print("[Ping] Failed")
+        time.sleep(300)
+
+# Get candles
 def get_candles():
     return client.futures_klines(symbol=SYMBOL, interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
 
+# Indicator calculations
 def calc_indicators(candles):
     closes = [float(k[4]) for k in candles]
     opens = [float(k[1]) for k in candles]
@@ -68,11 +95,24 @@ def calc_indicators(candles):
         "body": body
     }
 
+# Trade logic
 def check_and_trade():
+    global open_trade
     candles = get_candles()
     data = calc_indicators(candles)
     cp = data["close"]
 
+    # Check existing trade
+    if open_trade:
+        if open_trade["side"] == "BUY" and (cp <= open_trade["sl"] or cp >= open_trade["tp"]):
+            print("Exiting LONG at", cp)
+            close_position()
+        elif open_trade["side"] == "SELL" and (cp >= open_trade["sl"] or cp <= open_trade["tp"]):
+            print("Exiting SHORT at", cp)
+            close_position()
+        return
+
+    # BUY setup
     bull = (
         data["close"] > data["open"] and
         data["body"] > data["avg_body"] * BODY_STRENGTH and
@@ -82,6 +122,7 @@ def check_and_trade():
         data["close"] > data["ema"]
     )
 
+    # SELL setup
     bear = (
         data["close"] < data["open"] and
         data["body"] > data["avg_body"] * BODY_STRENGTH and
@@ -94,18 +135,17 @@ def check_and_trade():
     if bull:
         sl = round(data["low"] - data["body"], 2)
         tp = round(cp + data["body"] * RR, 2)
-        trail_offset = round(cp * TRAIL_PERCENT, 2)
-        print(f"Going LONG at {cp} | SL: {sl} | TP: {tp}")
-        place_order(SIDE_BUY, sl, tp, trail_offset)
+        place_order(SIDE_BUY, sl, tp)
+        open_trade = {"side": "BUY", "sl": sl, "tp": tp}
 
     elif bear:
         sl = round(data["high"] + data["body"], 2)
         tp = round(cp - data["body"] * RR, 2)
-        trail_offset = round(cp * TRAIL_PERCENT, 2)
-        print(f"Going SHORT at {cp} | SL: {sl} | TP: {tp}")
-        place_order(SIDE_SELL, sl, tp, trail_offset)
+        place_order(SIDE_SELL, sl, tp)
+        open_trade = {"side": "SELL", "sl": sl, "tp": tp}
 
-def place_order(side, stop_loss, take_profit, trail_offset):
+# Place trade
+def place_order(side, sl, tp):
     try:
         order = client.futures_create_order(
             symbol=SYMBOL,
@@ -113,67 +153,36 @@ def place_order(side, stop_loss, take_profit, trail_offset):
             type=ORDER_TYPE_MARKET,
             quantity=LOT_SIZE
         )
-        print(f"Order placed: {order['orderId']}")
-        opposite = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-
-        # SL
-        client.futures_create_order(
-            symbol=SYMBOL,
-            side=opposite,
-            type=ORDER_TYPE_STOP_MARKET,
-            stopPrice=stop_loss,
-            closePosition=True,
-            timeInForce=TIME_IN_FORCE_GTC,
-            reduceOnly=True
-        )
-
-        # TP
-        client.futures_create_order(
-            symbol=SYMBOL,
-            side=opposite,
-            type=ORDER_TYPE_TAKE_PROFIT_MARKET,
-            stopPrice=take_profit,
-            closePosition=True,
-            timeInForce=TIME_IN_FORCE_GTC,
-            reduceOnly=True
-        )
-
-        print("SL and TP orders placed.")
-
+        print(f"Trade opened: {side} | SL: {sl} | TP: {tp}")
     except Exception as e:
-        print(f"Error placing order: {e}")
+        print("Order error:", e)
 
-# --- Ping server and HTTP server ---
-def ping_url():
+# Close trade
+def close_position():
+    global open_trade
+    try:
+        side = SIDE_SELL if open_trade["side"] == "BUY" else SIDE_BUY
+        client.futures_create_order(
+            symbol=SYMBOL,
+            side=side,
+            type=ORDER_TYPE_MARKET,
+            quantity=LOT_SIZE,
+            reduceOnly=True
+        )
+        open_trade = None
+    except Exception as e:
+        print("Close error:", e)
+
+# --- Main ---
+if __name__ == "__main__":
+    threading.Thread(target=start_http_server, daemon=True).start()
+    threading.Thread(target=start_pinger, daemon=True).start()
+
+    print("Bot is live...")
+
     while True:
         try:
-            if PING_URL:
-                requests.get(PING_URL)
-                print("Pinged:", PING_URL)
-        except:
-            print("Ping failed.")
-        time.sleep(300)
-
-class PingHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot running")
-
-def run_http_server():
-    server = HTTPServer(("", 8080), PingHandler)
-    server.serve_forever()
-
-# --- Start everything ---
-print("Bot is live...")
-
-# Threads: HTTP + Ping + Main Loop
-threading.Thread(target=run_http_server, daemon=True).start()
-threading.Thread(target=ping_url, daemon=True).start()
-
-while True:
-    try:
-        check_and_trade()
-    except Exception as e:
-        print("Runtime error:", e)
-    time.sleep(1)
+            check_and_trade()
+        except Exception as e:
+            print("Loop error:", e)
+        time.sleep(1)
