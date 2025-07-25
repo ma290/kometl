@@ -2,8 +2,6 @@ import os
 import asyncio
 import json
 import aiohttp
-import math
-from decimal import Decimal
 from dotenv import load_dotenv
 from binance import AsyncClient, BinanceSocketManager
 from datetime import datetime
@@ -30,7 +28,6 @@ rsiSellMin = 30
 rsiSellMax = 60
 
 candles = []
-
 position_open = False
 open_side = None
 sl_price = None
@@ -38,7 +35,6 @@ tp_price = None
 entry_price = None
 trail_active = False
 breakeven_active = False
-
 
 async def ping_url():
     while True:
@@ -50,7 +46,6 @@ async def ping_url():
             print(f"Ping error: {e}")
         await asyncio.sleep(300)
 
-
 def compute_rsi(closes, period):
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [max(d, 0) for d in deltas]
@@ -60,14 +55,12 @@ def compute_rsi(closes, period):
     rs = avg_gain / avg_loss if avg_loss != 0 else 0
     return 100 - (100 / (1 + rs))
 
-
 def ema(values, period):
     multiplier = 2 / (period + 1)
     ema_vals = [sum(values[:period]) / period]
     for price in values[period:]:
         ema_vals.append((price - ema_vals[-1]) * multiplier + ema_vals[-1])
     return ema_vals[-1]
-
 
 def calc_trade_logic():
     if len(candles) < max(rsi_period + 1, ema_period):
@@ -118,7 +111,6 @@ def calc_trade_logic():
         return "SELL", sl, tp, close
     return None
 
-
 async def order_side(client, side, sl, tp, entry):
     global position_open, open_side, sl_price, tp_price, entry_price, trail_active, breakeven_active
     try:
@@ -140,7 +132,6 @@ async def order_side(client, side, sl, tp, entry):
     except Exception as e:
         print(f"Order Error: {e}")
 
-
 async def exit_trade(client, reason):
     global position_open, open_side
     try:
@@ -156,12 +147,11 @@ async def exit_trade(client, reason):
     except Exception as e:
         print(f"Exit Error: {e}")
 
-
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
     bsm = BinanceSocketManager(client)
-    async with bsm.mark_price_socket(SYMBOL.upper()) as socket:
-        async for msg in socket:
+    async with bsm.mark_price_socket(SYMBOL.upper()) as stream:
+        async for msg in stream:
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
@@ -186,6 +176,7 @@ async def price_monitor(client):
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
                         await exit_trade(client, "SL/TP HIT")
 
+            await asyncio.sleep(0)  # Millisecond-level non-blocking yield
 
 async def candle_collector():
     while True:
@@ -208,7 +199,6 @@ async def candle_collector():
         except Exception as e:
             print(f"Candle fetch error: {e}")
 
-
 async def trade_handler(client):
     while True:
         if not position_open:
@@ -218,10 +208,8 @@ async def trade_handler(client):
                 await order_side(client, side, sl, tp, entry)
         await asyncio.sleep(1)
 
-
 async def handle_http(_):
     return web.Response(text="Bot is alive.")
-
 
 async def start_http_server():
     app = web.Application()
@@ -230,7 +218,6 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-
 
 async def main():
     client = await AsyncClient.create(API_KEY, API_SECRET, testnet=True)
