@@ -4,6 +4,7 @@ import threading
 import requests
 from binance.client import Client
 from binance.enums import *
+from binance.streams import BinanceSocketManager
 from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -14,11 +15,11 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 PING_URL = os.getenv("PING_URL")  # Optional
 
-# Binance Testnet client
+# Binance client
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
 
-# Strategy params
+# Strategy parameters
 LOT_SIZE = 0.03
 RSI_PERIOD = 14
 EMA_PERIOD = 50
@@ -27,8 +28,9 @@ BODY_STRENGTH = 2.0
 TRAIL_PERCENT = 0.5 / 100
 RR = 2.0
 
-# Global trade state
-open_trade = None
+# Global state
+open_trade = None  # {'side': 'BUY', 'sl': 12345.0, 'tp': 12500.0, 'entry': 12400.0}
+latest_price = None
 
 # HTTP Server for uptime (optional)
 class PingHandler(BaseHTTPRequestHandler):
@@ -41,7 +43,6 @@ def start_http_server():
     server = HTTPServer(('0.0.0.0', 8080), PingHandler)
     server.serve_forever()
 
-# Periodic ping
 def start_pinger():
     while True:
         if PING_URL:
@@ -52,11 +53,10 @@ def start_pinger():
                 print("[Ping] Failed")
         time.sleep(300)
 
-# Get candles
+# Get historical candles (1 minute)
 def get_candles():
-    return client.futures_klines(symbol=SYMBOL, interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
+    return client.futures_klines(symbol=SYMBOL, interval=Client.KLINE_INTERVAL_1MINUTE, limit=100)
 
-# Indicator calculations
 def calc_indicators(candles):
     closes = [float(k[4]) for k in candles]
     opens = [float(k[1]) for k in candles]
@@ -95,6 +95,36 @@ def calc_indicators(candles):
         "body": body
     }
 
+# WebSocket callback
+def price_handler(msg):
+    global latest_price
+    if msg['e'] == 'aggTrade':
+        latest_price = float(msg['p'])
+        check_exit_conditions()
+
+# Monitor for SL/TP hit
+def check_exit_conditions():
+    global open_trade, latest_price
+    if not open_trade or latest_price is None:
+        return
+
+    cp = latest_price
+    if open_trade["side"] == "BUY":
+        # Trailing SL
+        new_trail_sl = cp - (open_trade["entry"] * TRAIL_PERCENT)
+        if new_trail_sl > open_trade["sl"]:
+            open_trade["sl"] = round(new_trail_sl, 2)
+        if cp <= open_trade["sl"] or cp >= open_trade["tp"]:
+            print("Exiting LONG at", cp)
+            close_position()
+    elif open_trade["side"] == "SELL":
+        new_trail_sl = cp + (open_trade["entry"] * TRAIL_PERCENT)
+        if new_trail_sl < open_trade["sl"]:
+            open_trade["sl"] = round(new_trail_sl, 2)
+        if cp >= open_trade["sl"] or cp <= open_trade["tp"]:
+            print("Exiting SHORT at", cp)
+            close_position()
+
 # Trade logic
 def check_and_trade():
     global open_trade
@@ -102,17 +132,9 @@ def check_and_trade():
     data = calc_indicators(candles)
     cp = data["close"]
 
-    # Check existing trade
     if open_trade:
-        if open_trade["side"] == "BUY" and (cp <= open_trade["sl"] or cp >= open_trade["tp"]):
-            print("Exiting LONG at", cp)
-            close_position()
-        elif open_trade["side"] == "SELL" and (cp >= open_trade["sl"] or cp <= open_trade["tp"]):
-            print("Exiting SHORT at", cp)
-            close_position()
         return
 
-    # BUY setup
     bull = (
         data["close"] > data["open"] and
         data["body"] > data["avg_body"] * BODY_STRENGTH and
@@ -122,7 +144,6 @@ def check_and_trade():
         data["close"] > data["ema"]
     )
 
-    # SELL setup
     bear = (
         data["close"] < data["open"] and
         data["body"] > data["avg_body"] * BODY_STRENGTH and
@@ -135,17 +156,14 @@ def check_and_trade():
     if bull:
         sl = round(data["low"] - data["body"], 2)
         tp = round(cp + data["body"] * RR, 2)
-        place_order(SIDE_BUY, sl, tp)
-        open_trade = {"side": "BUY", "sl": sl, "tp": tp}
-
+        place_order(SIDE_BUY, sl, tp, cp)
     elif bear:
         sl = round(data["high"] + data["body"], 2)
         tp = round(cp - data["body"] * RR, 2)
-        place_order(SIDE_SELL, sl, tp)
-        open_trade = {"side": "SELL", "sl": sl, "tp": tp}
+        place_order(SIDE_SELL, sl, tp, cp)
 
-# Place trade
-def place_order(side, sl, tp):
+def place_order(side, sl, tp, entry):
+    global open_trade
     try:
         order = client.futures_create_order(
             symbol=SYMBOL,
@@ -153,7 +171,8 @@ def place_order(side, sl, tp):
             type=ORDER_TYPE_MARKET,
             quantity=LOT_SIZE
         )
-        print(f"Trade opened: {side} | SL: {sl} | TP: {tp}")
+        open_trade = {"side": side, "sl": sl, "tp": tp, "entry": entry}
+        print(f"Trade opened: {side} | Entry: {entry} | SL: {sl} | TP: {tp}")
     except Exception as e:
         print("Order error:", e)
 
@@ -173,16 +192,21 @@ def close_position():
     except Exception as e:
         print("Close error:", e)
 
-# --- Main ---
+# Main
 if __name__ == "__main__":
     threading.Thread(target=start_http_server, daemon=True).start()
     threading.Thread(target=start_pinger, daemon=True).start()
 
     print("Bot is live...")
 
+    # Start WebSocket for price
+    bm = BinanceSocketManager(client)
+    conn_key = bm.start_aggtrade_socket(symbol=SYMBOL.lower(), callback=price_handler)
+    bm.start()
+
     while True:
         try:
             check_and_trade()
         except Exception as e:
             print("Loop error:", e)
-        time.sleep(1)
+        time.sleep(60)  # Candle-based decision every 1 min
