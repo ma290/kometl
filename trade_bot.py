@@ -1,41 +1,42 @@
 import os
 import asyncio
-import json
 import aiohttp
-from dotenv import load_dotenv
-from binance import AsyncClient, BinanceSocketManager
 from datetime import datetime
 from aiohttp import web
+from binance import AsyncClient
+from dotenv import load_dotenv
 
+# === Load Environment Variables ===
 load_dotenv()
-
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "btcusdt").lower()
 PING_URL = os.getenv("PING_URL")
 
-TRADE_QTY = 0.01
+# === Strategy Parameters ===
+TRADE_QTY = 0.03
 rsi_period = 14
 ema_period = 50
+risk_reward_ratio = 2.0
 body_strength_mult = 1.0
 volume_strength_mult = 1.0
-risk_reward_ratio = 2.0
 trail_offset_pct = 0.5
+breakeven_buffer_pct = 0.2
 
-rsiBuyMin = 40
-rsiBuyMax = 70
-rsiSellMin = 30
-rsiSellMax = 60
+rsiBuyMin, rsiBuyMax = 40, 70
+rsiSellMin, rsiSellMax = 30, 60
 
+# === State (RAM-based) ===
 candles = []
 position_open = False
 open_side = None
+entry_price = None
 sl_price = None
 tp_price = None
-entry_price = None
 trail_active = False
 breakeven_active = False
 
+# === Ping Monitor ===
 async def ping_url():
     if not PING_URL:
         return
@@ -43,8 +44,8 @@ async def ping_url():
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             try:
-                async with session.get(PING_URL) as resp:
-                    print(f"[{datetime.now()}] Ping: {resp.status}")
+                async with session.get(PING_URL) as res:
+                    print(f"[{datetime.now()}] Ping OK: {res.status}")
             except Exception as e:
                 print(f"[Ping Error]: {e}")
             await asyncio.sleep(300)
@@ -69,73 +70,67 @@ def ema(values, period):
         ema_val = (val - ema_val) * multiplier + ema_val
     return ema_val
 
-def calc_trade_logic():
+def calc_trade_signal():
     if len(candles) < max(rsi_period + 1, ema_period):
         return None
-
     latest = candles[-1]
     close = latest["close"]
     open_ = latest["open"]
     high = latest["high"]
     low = latest["low"]
     volume = latest["volume"]
-
     closes = [c["close"] for c in candles]
     volumes = [c["volume"] for c in candles]
 
     body = abs(close - open_)
-    avg_body = sum([abs(c["close"] - c["open"]) for c in candles[-20:]]) / 20
+    avg_body = sum(abs(c["close"] - c["open"]) for c in candles[-20:]) / 20
     avg_vol = sum(volumes[-20:]) / 20
     upper_wick = high - max(open_, close)
     lower_wick = min(open_, close) - low
     rsi = compute_rsi(closes, rsi_period)
     ema_val = ema(closes, ema_period)
 
-    is_bull = close > open_
-    bull_conditions = [
-        is_bull,
+    is_bull = close > open_ and all([
         body > avg_body * body_strength_mult,
         volume > avg_vol * volume_strength_mult,
         upper_wick < body * 0.25,
         rsiBuyMin <= rsi <= rsiBuyMax,
         close > ema_val
-    ]
+    ])
 
-    is_bear = close < open_
-    bear_conditions = [
-        is_bear,
+    is_bear = close < open_ and all([
         body > avg_body * body_strength_mult,
         volume > avg_vol * volume_strength_mult,
         lower_wick < body * 0.25,
         rsiSellMin <= rsi <= rsiSellMax,
         close < ema_val
-    ]
+    ])
 
-    if all(bull_conditions):
+    if is_bull:
         sl = low - body
         tp = close + body * risk_reward_ratio
         return "BUY", sl, tp, close
-    elif all(bear_conditions):
+    elif is_bear:
         sl = high + body
         tp = close - body * risk_reward_ratio
         return "SELL", sl, tp, close
     return None
 
-async def order_side(client, side, sl, tp, entry):
-    global position_open, open_side, sl_price, tp_price, entry_price, trail_active, breakeven_active
+async def place_order(client, side, sl, tp, entry):
+    global position_open, open_side, entry_price, sl_price, tp_price, trail_active, breakeven_active
     try:
-        order = await client.futures_create_order(
+        await client.futures_create_order(
             symbol=SYMBOL.upper(),
             side=side,
             type="MARKET",
             quantity=TRADE_QTY,
         )
-        print(f"{side} ORDER: {order}")
+        print(f"{side} ORDER PLACED")
         position_open = True
         open_side = side
+        entry_price = entry
         sl_price = sl
         tp_price = tp
-        entry_price = entry
         trail_active = True
         breakeven_active = True
     except Exception as e:
@@ -144,60 +139,63 @@ async def order_side(client, side, sl, tp, entry):
 async def exit_trade(client, reason):
     global position_open
     try:
-        side = "SELL" if open_side == "BUY" else "BUY"
-        order = await client.futures_create_order(
+        exit_side = "SELL" if open_side == "BUY" else "BUY"
+        await client.futures_create_order(
             symbol=SYMBOL.upper(),
-            side=side,
+            side=exit_side,
             type="MARKET",
             quantity=TRADE_QTY,
         )
-        print(f"EXIT {reason}: {order}")
+        print(f"[EXIT]: {reason}")
         position_open = False
     except Exception as e:
         print(f"[Exit Error]: {e}")
 
-async def price_monitor(client):
+# === Real-time SL/TP Monitor (Fixed) ===
+async def monitor_price(client):
     global sl_price, tp_price, trail_active, breakeven_active
-    bsm = BinanceSocketManager(client)
-    socket = bsm.mark_price_socket(SYMBOL.upper())
-    async with socket as stream:
-        async for msg in stream:
-            try:
-                price = float(msg["p"])
-                if position_open:
+    url = f"wss://fstream.binance.com/ws/{SYMBOL}@markPrice"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            async for msg in ws:
+                try:
+                    data = msg.json()
+                    price = float(data["p"])
+                    if not position_open:
+                        continue
+
                     offset = entry_price * (trail_offset_pct / 100)
+
                     if trail_active:
                         if open_side == "BUY" and price - offset > sl_price:
                             sl_price = price - offset
                         elif open_side == "SELL" and price + offset < sl_price:
                             sl_price = price + offset
 
-                    buffer = entry_price * 0.002
                     if breakeven_active:
-                        if open_side == "BUY" and price >= entry_price + buffer:
+                        threshold = entry_price * (1 + breakeven_buffer_pct / 100) if open_side == "BUY" else entry_price * (1 - breakeven_buffer_pct / 100)
+                        if (open_side == "BUY" and price >= threshold) or (open_side == "SELL" and price <= threshold):
                             sl_price = entry_price
                             breakeven_active = False
-                        elif open_side == "SELL" and price <= entry_price - buffer:
-                            sl_price = entry_price
-                            breakeven_active = False
+                            print("Breakeven SL activated")
 
-                    if open_side == "BUY" and (price <= sl_price or price >= tp_price):
-                        await exit_trade(client, "SL/TP HIT")
-                    elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
-                        await exit_trade(client, "SL/TP HIT")
-            except Exception as e:
-                print(f"[Monitor Error]: {e}")
+                    if (open_side == "BUY" and (price <= sl_price or price >= tp_price)) or \
+                       (open_side == "SELL" and (price >= sl_price or price <= tp_price)):
+                        await exit_trade(client, "TP/SL HIT")
 
-async def candle_collector():
+                except Exception as e:
+                    print(f"[Monitor Error]: {e}")
+
+async def fetch_candles():
     url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=1m&limit=100"
     timeout = aiohttp.ClientTimeout(total=5)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             try:
                 async with session.get(url) as res:
-                    data = await res.json()
+                    raw = await res.json()
                     candles.clear()
-                    for c in data:
+                    for c in raw:
                         candles.append({
                             "time": c[0],
                             "open": float(c[1]),
@@ -207,22 +205,20 @@ async def candle_collector():
                             "volume": float(c[5])
                         })
             except Exception as e:
-                print(f"[Candle Fetch Error]: {e}")
+                print(f"[Candle Error]: {e}")
             await asyncio.sleep(60)
 
-async def trade_handler(client):
+async def trade_loop(client):
     while True:
         if not position_open:
-            signal = calc_trade_logic()
+            signal = calc_trade_signal()
             if signal:
                 side, sl, tp, entry = signal
-                await order_side(client, side, sl, tp, entry)
+                await place_order(client, side, sl, tp, entry)
         await asyncio.sleep(5)
 
-async def handle_http(_):
-    return web.Response(text="Bot is running.")
-
-async def start_http_server():
+async def handle_http(_): return web.Response(text="Bot running")
+async def start_http():
     app = web.Application()
     app.router.add_get("/", handle_http)
     runner = web.AppRunner(app)
@@ -235,10 +231,10 @@ async def main():
     try:
         await asyncio.gather(
             ping_url(),
-            candle_collector(),
-            trade_handler(client),
-            price_monitor(client),
-            start_http_server(),
+            fetch_candles(),
+            trade_loop(client),
+            monitor_price(client),
+            start_http(),
         )
     finally:
         await client.close_connection()
