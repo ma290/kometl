@@ -1,4 +1,4 @@
-# trade_bot.py
+# trade_bot.py 
 import os
 import asyncio
 import json
@@ -161,7 +161,7 @@ async def exit_trade(client, reason):
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
     bsm = BinanceSocketManager(client)
-    socket = bsm.mark_price_socket(SYMBOL.upper())
+    socket = bsm.symbol_mark_price_socket(SYMBOL.upper())
     async with socket as stream:
         async for msg in stream:
             if "p" in msg:
