@@ -1,4 +1,3 @@
-```python
 # trade_bot.py
 import os
 import asyncio
@@ -17,11 +16,11 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "btcusdt").lower()
 PING_URL = os.getenv("PING_URL")
 
-TRADE_QTY = 0.03
+TRADE_QTY = 0.01
 rsi_period = 14
 ema_period = 50
-body_strength_mult = 2.0
-volume_strength_mult = 2.0
+body_strength_mult = 1.0
+volume_strength_mult = 1.0
 risk_reward_ratio = 2.0
 trail_offset_pct = 0.5
 
@@ -236,4 +235,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
