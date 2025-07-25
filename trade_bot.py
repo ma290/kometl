@@ -163,8 +163,7 @@ async def price_monitor(client):
     bsm = BinanceSocketManager(client)
     socket = bsm.mark_price_socket(SYMBOL.upper())
     async with socket as stream:
-        while True:
-            msg = await stream.recv()
+        async for msg in stream:
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
