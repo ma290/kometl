@@ -14,7 +14,7 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "btcusdt").lower()
 PING_URL = os.getenv("PING_URL")
 
-TRADE_QTY = 0.01
+TRADE_QTY = 0.03
 rsi_period = 14
 ema_period = 50
 body_strength_mult = 1.0
@@ -37,8 +37,7 @@ trail_active = False
 breakeven_active = False
 
 async def ping_url():
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
         while True:
             try:
                 async with session.get(PING_URL) as resp:
@@ -85,22 +84,25 @@ def calc_trade_logic():
     ema_val = ema(closes, ema_period)
 
     is_bull = close > open_
-    body_strong_bull = body > avg_body * body_strength_mult
-    vol_strong_bull = volume > avg_vol * volume_strength_mult
-    low_upper_wick = upper_wick < body * 0.25
-    rsi_ok_bull = rsiBuyMin <= rsi <= rsiBuyMax
-    ema_ok_bull = close > ema_val
-
-    bull_confluence = all([is_bull, body_strong_bull, vol_strong_bull, low_upper_wick, rsi_ok_bull, ema_ok_bull])
-
     is_bear = close < open_
-    body_strong_bear = body > avg_body * body_strength_mult
-    vol_strong_bear = volume > avg_vol * volume_strength_mult
-    low_lower_wick = lower_wick < body * 0.25
-    rsi_ok_bear = rsiSellMin <= rsi <= rsiSellMax
-    ema_ok_bear = close < ema_val
 
-    bear_confluence = all([is_bear, body_strong_bear, vol_strong_bear, low_lower_wick, rsi_ok_bear, ema_ok_bear])
+    bull_confluence = all([
+        is_bull,
+        body > avg_body * body_strength_mult,
+        volume > avg_vol * volume_strength_mult,
+        upper_wick < body * 0.25,
+        rsiBuyMin <= rsi <= rsiBuyMax,
+        close > ema_val
+    ])
+
+    bear_confluence = all([
+        is_bear,
+        body > avg_body * body_strength_mult,
+        volume > avg_vol * volume_strength_mult,
+        lower_wick < body * 0.25,
+        rsiSellMin <= rsi <= rsiSellMax,
+        close < ema_val
+    ])
 
     if bull_confluence:
         sl = low - body
@@ -151,12 +153,14 @@ async def exit_trade(client, reason):
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
     bsm = BinanceSocketManager(client)
-    async with bsm.mark_price_socket(SYMBOL.upper()) as stream:
-        async for msg in stream:
+    stream = await bsm.mark_price_socket(SYMBOL.upper())
+    async with stream as msg_stream:
+        async for msg in msg_stream:
             try:
                 price = float(msg["p"])
                 if position_open:
                     offset = entry_price * (trail_offset_pct / 100)
+
                     if trail_active:
                         if open_side == "BUY" and price - offset > sl_price:
                             sl_price = price - offset
@@ -176,17 +180,17 @@ async def price_monitor(client):
                         await exit_trade(client, "SL/TP HIT")
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
                         await exit_trade(client, "SL/TP HIT")
+
             except Exception as e:
                 print(f"Monitor Error: {e}")
-
             await asyncio.sleep(0)
 
 async def candle_collector():
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
         while True:
             try:
-                async with session.get(f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=1m&limit=100") as res:
+                url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=1m&limit=100"
+                async with session.get(url) as res:
                     data = await res.json()
                     candles.clear()
                     for c in data:
