@@ -1,4 +1,3 @@
-# trade_bot.py 
 import os
 import asyncio
 import json
@@ -161,9 +160,11 @@ async def exit_trade(client, reason):
 async def price_monitor(client):
     global sl_price, tp_price, trail_active, breakeven_active
     bsm = BinanceSocketManager(client)
-    socket = bsm.symbol_mark_price_socket(SYMBOL.upper())
-    async with socket as stream:
-        async for msg in stream:
+    socket = await bsm.mark_price_socket(SYMBOL.upper())
+    await socket.__aenter__()
+    try:
+        while True:
+            msg = await socket.recv()
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
@@ -187,6 +188,8 @@ async def price_monitor(client):
                         await exit_trade(client, "SL/TP HIT")
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
                         await exit_trade(client, "SL/TP HIT")
+    finally:
+        await socket.__aexit__(None, None, None)
 
 
 async def candle_collector():
