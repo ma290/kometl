@@ -144,10 +144,7 @@ async def order_side(client, side, sl, tp, entry):
 async def exit_trade(client, reason):
     global position_open, open_side
     try:
-        if open_side == "BUY":
-            side = "SELL"
-        else:
-            side = "BUY"
+        side = "SELL" if open_side == "BUY" else "BUY"
         order = await client.futures_create_order(
             symbol=SYMBOL.upper(),
             side=side,
@@ -167,15 +164,14 @@ async def price_monitor(client):
             if "p" in msg:
                 price = float(msg["p"])
                 if position_open:
-                    # Trailing SL logic
+                    offset = entry_price * (trail_offset_pct / 100)
+
                     if trail_active:
-                        offset = entry_price * (trail_offset_pct / 100)
                         if open_side == "BUY" and price - offset > sl_price:
                             sl_price = price - offset
                         elif open_side == "SELL" and price + offset < sl_price:
                             sl_price = price + offset
 
-                    # Breakeven logic
                     if breakeven_active:
                         buffer = entry_price * 0.002
                         if open_side == "BUY" and price >= entry_price + buffer:
@@ -185,7 +181,6 @@ async def price_monitor(client):
                             sl_price = entry_price
                             breakeven_active = False
 
-                    # Exit condition
                     if open_side == "BUY" and (price <= sl_price or price >= tp_price):
                         await exit_trade(client, "SL/TP HIT")
                     elif open_side == "SELL" and (price >= sl_price or price <= tp_price):
