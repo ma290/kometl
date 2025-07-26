@@ -138,7 +138,7 @@ async def place_order(client, side, sl, tp, entry):
         print(f"[Order Error]: {e}")
 
 async def exit_trade(client, reason):
-    global position_open
+    global position_open, open_side
     try:
         exit_side = "SELL" if open_side == "BUY" else "BUY"
         await client.futures_create_order(
@@ -156,7 +156,7 @@ async def exit_trade(client, reason):
 # === Real-time SL/TP Monitor ===
 async def monitor_price(client):
     global sl_price, tp_price, trail_active, breakeven_active, position_open
-    url = f"wss://fstream.binance.com/ws/{SYMBOL.lower()}@markPrice"
+    url = f"wss://stream.binancefuture.com/ws/{SYMBOL.lower()}@markPrice"
     while True:
         try:
             async with aiohttp.ClientSession() as session:
@@ -187,15 +187,15 @@ async def monitor_price(client):
                                 (open_side == "BUY" and (price <= sl_price or price >= tp_price)) or
                                 (open_side == "SELL" and (price >= sl_price or price <= tp_price))
                             ):
-                                position_open = False
                                 await exit_trade(client, "🎯 TP or SL hit")
 
                         except Exception as e:
-                            print(f"[Monitor Parse Error]: {e}")
+                            print(f"[Monitor Error]: {e}")
         except Exception as e:
-            print(f"[Reconnect WS Error]: {e}")
+            print(f"[WS Error]: {e}")
             await asyncio.sleep(5)
 
+# === Fetch Candles from Testnet ===
 async def fetch_candles():
     url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL}&interval=1m&limit=100"
     timeout = aiohttp.ClientTimeout(total=5)
@@ -204,9 +204,9 @@ async def fetch_candles():
             try:
                 async with session.get(url) as res:
                     raw = await res.json()
-                    candles.clear()
+                    new_data = []
                     for c in raw:
-                        candles.append({
+                        new_data.append({
                             "time": c[0],
                             "open": float(c[1]),
                             "high": float(c[2]),
@@ -214,18 +214,20 @@ async def fetch_candles():
                             "close": float(c[4]),
                             "volume": float(c[5])
                         })
+                    candles.clear()
+                    candles.extend(new_data)
             except Exception as e:
                 print(f"[Candle Error]: {e}")
             await asyncio.sleep(60)
 
 async def trade_loop(client):
     while True:
-        if not position_open:
+        await asyncio.sleep(2)
+        if not position_open and candles:
             signal = calc_trade_signal()
             if signal:
                 side, sl, tp, entry = signal
                 await place_order(client, side, sl, tp, entry)
-        await asyncio.sleep(5)
 
 async def handle_http(_): return web.Response(text="Bot running")
 
