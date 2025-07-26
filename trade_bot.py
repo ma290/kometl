@@ -2,7 +2,6 @@ import os
 import asyncio
 import aiohttp
 import json
-import time
 from datetime import datetime
 from aiohttp import web
 from binance.client import Client
@@ -73,11 +72,11 @@ def rsi(closes, period):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# === Trade Logic ===
+# === Trade Signal Logic ===
 def check_signal(candles):
     global active_trade
     if active_trade:
-        return  # Skip if trade is active
+        return
 
     body = [abs(c["close"] - c["open"]) for c in candles]
     volume = [c["volume"] for c in candles]
@@ -99,7 +98,6 @@ def check_signal(candles):
     if not all([avg_body, avg_vol, ema, rsi_val]):
         return
 
-    # === Buy Condition ===
     if (
         last["close"] > last["open"] and
         body_last > avg_body * BODY_MULT and
@@ -112,7 +110,6 @@ def check_signal(candles):
         tp = last["close"] + body_last * RR_RATIO
         place_order("BUY", sl, tp)
 
-    # === Sell Condition ===
     elif (
         last["close"] < last["open"] and
         body_last > avg_body * BODY_MULT and
@@ -136,13 +133,14 @@ def place_order(side, sl, tp):
             quantity=TRADE_QTY
         )
         active_trade = {"side": side, "sl": sl, "tp": tp}
-        print(f"✅ {side} ORDER PLACED @ {order['fills'][0]['price'] if 'fills' in order else 'MARKET'}")
+        print(f"✅ {side} ORDER PLACED")
     except Exception as e:
         print("❌ Failed to place order:", e)
 
-# === Price Monitor ===
+# === Monitor Exit Conditions (SL/TP) ===
 async def monitor_price():
     global active_trade
+    buffer = 0.1  # Price precision buffer
     while True:
         if active_trade:
             try:
@@ -151,23 +149,29 @@ async def monitor_price():
                 sl = active_trade["sl"]
                 tp = active_trade["tp"]
                 side = active_trade["side"]
-                hit = (price <= sl if side == "BUY" else price >= sl) or (price >= tp if side == "BUY" else price <= tp)
+
+                print(f"[Monitor] Price: {price:.2f} | SL: {sl:.2f} | TP: {tp:.2f} | Side: {side}")
+
+                hit = (
+                    (price <= sl + buffer if side == "BUY" else price >= sl - buffer) or
+                    (price >= tp - buffer if side == "BUY" else price <= tp + buffer)
+                )
+
                 if hit:
                     exit_side = "SELL" if side == "BUY" else "BUY"
                     client.futures_create_order(
                         symbol=SYMBOL,
                         side=SIDE_SELL if exit_side == "SELL" else SIDE_BUY,
                         type=ORDER_TYPE_MARKET,
-                        quantity=TRADE_QTY,
-                        reduceOnly=True
+                        quantity=TRADE_QTY
                     )
-                    print(f"📤 Exited {side} trade @ price {price}")
+                    print(f"📤 EXITED {side} trade @ price {price}")
                     active_trade = None
             except Exception as e:
                 print("❌ Price check error:", e)
         await asyncio.sleep(1)
 
-# === Health Server ===
+# === Health Check HTTP Server ===
 async def handle_health(request):
     return web.json_response({"status": "running"})
 
@@ -180,7 +184,7 @@ def start_http_server():
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     loop.run_until_complete(site.start())
 
-# === Ping Task ===
+# === Ping External URL to Keep Alive ===
 async def ping_url():
     async with aiohttp.ClientSession() as session:
         while True:
@@ -191,14 +195,14 @@ async def ping_url():
                 print("[Ping Error]", PING_URL)
             await asyncio.sleep(5)
 
-# === Main Task ===
+# === Main Candle Logic Loop ===
 async def main_loop():
     while True:
         candles = get_latest_15m_candle()
         check_signal(candles)
-        await asyncio.sleep(60)  # Check every new 15-min candle
+        await asyncio.sleep(60)
 
-# === Run Everything ===
+# === Start All Tasks ===
 if __name__ == "__main__":
     start_http_server()
     loop = asyncio.get_event_loop()
