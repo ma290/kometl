@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT")  # KEEP AS-IS
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 PING_URL = os.getenv("PING_URL")
 
 # === Strategy Parameters ===
@@ -120,16 +120,18 @@ def calc_trade_signal():
 async def place_order(client, side, sl, tp, entry):
     global position_open, open_side, entry_price, sl_price, tp_price, trail_active, breakeven_active
     try:
-        await client.futures_create_order(
+        order = await client.futures_create_order(
             symbol=SYMBOL,
             side=side,
             type="MARKET",
             quantity=TRADE_QTY,
         )
-        print(f"{side} ORDER PLACED @ {entry}")
+        fills = order.get("fills")
+        price = float(order["avgFillPrice"] if "avgFillPrice" in order else entry)
+        print(f"✅ {side} ORDER PLACED @ {price:.2f}")
         position_open = True
         open_side = side
-        entry_price = entry
+        entry_price = price
         sl_price = sl
         tp_price = tp
         trail_active = True
