@@ -1,6 +1,7 @@
 import os
 import asyncio
 import aiohttp
+import json
 from datetime import datetime
 from aiohttp import web
 from binance import AsyncClient
@@ -145,6 +146,7 @@ async def exit_trade(client, reason):
             side=exit_side,
             type="MARKET",
             quantity=TRADE_QTY,
+            reduceOnly=True
         )
         print(f"[EXIT TRADE]: {reason}")
         position_open = False
@@ -153,38 +155,46 @@ async def exit_trade(client, reason):
 
 # === Real-time SL/TP Monitor ===
 async def monitor_price(client):
-    global sl_price, tp_price, trail_active, breakeven_active
+    global sl_price, tp_price, trail_active, breakeven_active, position_open
     url = f"wss://fstream.binance.com/ws/{SYMBOL.lower()}@markPrice"
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(url) as ws:
-            async for msg in ws:
-                try:
-                    data = msg.json()
-                    price = float(data["p"])
-                    if not position_open:
-                        continue
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(url) as ws:
+                    async for msg in ws:
+                        try:
+                            data = json.loads(msg.data)
+                            price = float(data["p"])
+                            if not position_open:
+                                continue
 
-                    offset = entry_price * (trail_offset_pct / 100)
+                            offset = entry_price * (trail_offset_pct / 100)
 
-                    if trail_active:
-                        if open_side == "BUY" and price - offset > sl_price:
-                            sl_price = price - offset
-                        elif open_side == "SELL" and price + offset < sl_price:
-                            sl_price = price + offset
+                            if trail_active:
+                                if open_side == "BUY" and price - offset > sl_price:
+                                    sl_price = price - offset
+                                elif open_side == "SELL" and price + offset < sl_price:
+                                    sl_price = price + offset
 
-                    if breakeven_active:
-                        threshold = entry_price * (1 + breakeven_buffer_pct / 100) if open_side == "BUY" else entry_price * (1 - breakeven_buffer_pct / 100)
-                        if (open_side == "BUY" and price >= threshold) or (open_side == "SELL" and price <= threshold):
-                            sl_price = entry_price
-                            breakeven_active = False
-                            print("🔐 Breakeven SL activated")
+                            if breakeven_active:
+                                threshold = entry_price * (1 + breakeven_buffer_pct / 100) if open_side == "BUY" else entry_price * (1 - breakeven_buffer_pct / 100)
+                                if (open_side == "BUY" and price >= threshold) or (open_side == "SELL" and price <= threshold):
+                                    sl_price = entry_price
+                                    breakeven_active = False
+                                    print("🔐 Breakeven SL activated")
 
-                    if (open_side == "BUY" and (price <= sl_price or price >= tp_price)) or \
-                       (open_side == "SELL" and (price >= sl_price or price <= tp_price)):
-                        await exit_trade(client, "🎯 TP or SL hit")
+                            if position_open and (
+                                (open_side == "BUY" and (price <= sl_price or price >= tp_price)) or
+                                (open_side == "SELL" and (price >= sl_price or price <= tp_price))
+                            ):
+                                position_open = False
+                                await exit_trade(client, "🎯 TP or SL hit")
 
-                except Exception as e:
-                    print(f"[Monitor Error]: {e}")
+                        except Exception as e:
+                            print(f"[Monitor Parse Error]: {e}")
+        except Exception as e:
+            print(f"[Reconnect WS Error]: {e}")
+            await asyncio.sleep(5)
 
 async def fetch_candles():
     url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL}&interval=1m&limit=100"
@@ -218,6 +228,7 @@ async def trade_loop(client):
         await asyncio.sleep(5)
 
 async def handle_http(_): return web.Response(text="Bot running")
+
 async def start_http():
     app = web.Application()
     app.router.add_get("/", handle_http)
