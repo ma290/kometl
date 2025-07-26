@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
-SYMBOL = os.getenv("SYMBOL", "btcusdt").lower()
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")  # KEEP AS-IS
 PING_URL = os.getenv("PING_URL")
 
 # === Strategy Parameters ===
@@ -120,12 +120,12 @@ async def place_order(client, side, sl, tp, entry):
     global position_open, open_side, entry_price, sl_price, tp_price, trail_active, breakeven_active
     try:
         await client.futures_create_order(
-            symbol=SYMBOL.upper(),
+            symbol=SYMBOL,
             side=side,
             type="MARKET",
             quantity=TRADE_QTY,
         )
-        print(f"{side} ORDER PLACED")
+        print(f"{side} ORDER PLACED @ {entry}")
         position_open = True
         open_side = side
         entry_price = entry
@@ -141,20 +141,20 @@ async def exit_trade(client, reason):
     try:
         exit_side = "SELL" if open_side == "BUY" else "BUY"
         await client.futures_create_order(
-            symbol=SYMBOL.upper(),
+            symbol=SYMBOL,
             side=exit_side,
             type="MARKET",
             quantity=TRADE_QTY,
         )
-        print(f"[EXIT]: {reason}")
+        print(f"[EXIT TRADE]: {reason}")
         position_open = False
     except Exception as e:
         print(f"[Exit Error]: {e}")
 
-# === Real-time SL/TP Monitor (Fixed) ===
+# === Real-time SL/TP Monitor ===
 async def monitor_price(client):
     global sl_price, tp_price, trail_active, breakeven_active
-    url = f"wss://fstream.binance.com/ws/{SYMBOL}@markPrice"
+    url = f"wss://fstream.binance.com/ws/{SYMBOL.lower()}@markPrice"
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(url) as ws:
             async for msg in ws:
@@ -177,17 +177,17 @@ async def monitor_price(client):
                         if (open_side == "BUY" and price >= threshold) or (open_side == "SELL" and price <= threshold):
                             sl_price = entry_price
                             breakeven_active = False
-                            print("Breakeven SL activated")
+                            print("🔐 Breakeven SL activated")
 
                     if (open_side == "BUY" and (price <= sl_price or price >= tp_price)) or \
                        (open_side == "SELL" and (price >= sl_price or price <= tp_price)):
-                        await exit_trade(client, "TP/SL HIT")
+                        await exit_trade(client, "🎯 TP or SL hit")
 
                 except Exception as e:
                     print(f"[Monitor Error]: {e}")
 
 async def fetch_candles():
-    url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=1m&limit=100"
+    url = f"https://testnet.binancefuture.com/fapi/v1/klines?symbol={SYMBOL}&interval=1m&limit=100"
     timeout = aiohttp.ClientTimeout(total=5)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
