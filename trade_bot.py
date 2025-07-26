@@ -19,8 +19,8 @@ TRADE_QTY = 0.01
 rsi_period = 14
 ema_period = 50
 risk_reward_ratio = 2.0
-body_strength_mult = 0.5
-volume_strength_mult = 0.5
+body_strength_mult = 0.1
+volume_strength_mult = 0.1
 trail_offset_pct = 0.5
 breakeven_buffer_pct = 0.2
 
