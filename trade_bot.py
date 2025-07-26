@@ -29,7 +29,7 @@ RSI_SELL_MIN = 30
 RSI_SELL_MAX = 60
 
 # === Globals ===
-active_trade = None  # Stores {"side": "BUY"/"SELL", "sl": price, "tp": price}
+active_trade = None  # Stores {"side": "BUY"/"SELL", "sl": price, "tp": price, "hit": False}
 
 # === Initialize Binance Client ===
 client = Client(API_KEY, API_SECRET)
@@ -132,15 +132,14 @@ def place_order(side, sl, tp):
             type=ORDER_TYPE_MARKET,
             quantity=TRADE_QTY
         )
-        active_trade = {"side": side, "sl": sl, "tp": tp}
-        print(f"✅ {side} ORDER PLACED")
+        active_trade = {"side": side, "sl": sl, "tp": tp, "hit": False}
+        print(f"✅ {side} ORDER PLACED @ Market | SL: {sl:.2f} | TP: {tp:.2f}")
     except Exception as e:
         print("❌ Failed to place order:", e)
 
 # === Monitor Exit Conditions (SL/TP) ===
 async def monitor_price():
     global active_trade
-    buffer = 0.1  # Price precision buffer
     while True:
         if active_trade:
             try:
@@ -149,27 +148,41 @@ async def monitor_price():
                 sl = active_trade["sl"]
                 tp = active_trade["tp"]
                 side = active_trade["side"]
+                exit_needed = False
 
-                print(f"[Monitor] Price: {price:.2f} | SL: {sl:.2f} | TP: {tp:.2f} | Side: {side}")
+                if side == "BUY":
+                    if price <= sl:
+                        print(f"[Exit Triggered] SL hit for BUY at {price}")
+                        exit_needed = True
+                    elif price >= tp:
+                        print(f"[Exit Triggered] TP hit for BUY at {price}")
+                        exit_needed = True
+                elif side == "SELL":
+                    if price >= sl:
+                        print(f"[Exit Triggered] SL hit for SELL at {price}")
+                        exit_needed = True
+                    elif price <= tp:
+                        print(f"[Exit Triggered] TP hit for SELL at {price}")
+                        exit_needed = True
 
-                hit = (
-                    (price <= sl + buffer if side == "BUY" else price >= sl - buffer) or
-                    (price >= tp - buffer if side == "BUY" else price <= tp + buffer)
-                )
-
-                if hit:
+                if exit_needed or active_trade["hit"]:
                     exit_side = "SELL" if side == "BUY" else "BUY"
-                    client.futures_create_order(
-                        symbol=SYMBOL,
-                        side=SIDE_SELL if exit_side == "SELL" else SIDE_BUY,
-                        type=ORDER_TYPE_MARKET,
-                        quantity=TRADE_QTY
-                    )
-                    print(f"📤 EXITED {side} trade @ price {price}")
-                    active_trade = None
+                    try:
+                        client.futures_create_order(
+                            symbol=SYMBOL,
+                            side=SIDE_SELL if exit_side == "SELL" else SIDE_BUY,
+                            type=ORDER_TYPE_MARKET,
+                            quantity=TRADE_QTY
+                        )
+                        print(f"📤 EXITED {side} trade @ price {price}")
+                        active_trade = None
+                    except Exception as e:
+                        print(f"❌ Exit failed: {e}")
+                        active_trade["hit"] = True  # Mark for retry
+
             except Exception as e:
                 print("❌ Price check error:", e)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.2)  # 200 ms delay
 
 # === Health Check HTTP Server ===
 async def handle_health(request):
@@ -193,7 +206,7 @@ async def ping_url():
                     print("[Ping OK]", PING_URL)
             except:
                 print("[Ping Error]", PING_URL)
-            await asyncio.sleep(5)
+            await asyncio.sleep(600)
 
 # === Main Candle Logic Loop ===
 async def main_loop():
