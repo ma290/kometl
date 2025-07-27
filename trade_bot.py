@@ -1,7 +1,6 @@
 import os
 import asyncio
 import aiohttp
-import json
 from datetime import datetime
 from aiohttp import web
 from binance import AsyncClient, BinanceSocketManager
@@ -30,7 +29,7 @@ RSI_SELL_MAX = 60
 TRADE_QTY = 0.01
 
 # === In-Memory Tracking ===
-active_position = None  # {"side": "BUY"/"SELL", "entry": price, "sl": price, "tp": price}
+active_position = None
 
 async def fetch_klines(client):
     klines = await client.futures_klines(symbol=SYMBOL, interval=AsyncClient.KLINE_INTERVAL_1MINUTE, limit=100)
@@ -49,7 +48,6 @@ def calculate_indicators(klines):
     upper_wick = highs[-1] - max(closes[-1], opens[-1])
     lower_wick = min(closes[-1], opens[-1]) - lows[-1]
 
-    # RSI calculation
     gains, losses = [], []
     for i in range(1, RSI_PERIOD + 1):
         delta = closes[-i] - closes[-i - 1]
@@ -59,7 +57,6 @@ def calculate_indicators(klines):
     rs = avg_gain / avg_loss if avg_loss != 0 else 0
     rsi = 100 - (100 / (1 + rs))
 
-    # EMA calculation
     ema = sum(closes[-EMA_PERIOD:]) / EMA_PERIOD
 
     return {
@@ -78,22 +75,22 @@ def calculate_indicators(klines):
 def check_signals(ind):
     is_bull = ind["close"] > ind["open"]
     bull_confluence = (
-        is_bull
-        and ind["body"] > ind["avg_body"] * BODY_MULT
-        and ind["volume"] > ind["avg_vol"] * VOL_MULT
-        and ind["upper_wick"] < ind["body"] * 0.25
-        and RSI_BUY_MIN <= ind["rsi"] <= RSI_BUY_MAX
-        and ind["close"] > ind["ema"]
+        is_bull and
+        ind["body"] > ind["avg_body"] * BODY_MULT and
+        ind["volume"] > ind["avg_vol"] * VOL_MULT and
+        ind["upper_wick"] < ind["body"] * 0.25 and
+        RSI_BUY_MIN <= ind["rsi"] <= RSI_BUY_MAX and
+        ind["close"] > ind["ema"]
     )
 
     is_bear = ind["close"] < ind["open"]
     bear_confluence = (
-        is_bear
-        and ind["body"] > ind["avg_body"] * BODY_MULT
-        and ind["volume"] > ind["avg_vol"] * VOL_MULT
-        and ind["lower_wick"] < ind["body"] * 0.25
-        and RSI_SELL_MIN <= ind["rsi"] <= RSI_SELL_MAX
-        and ind["close"] < ind["ema"]
+        is_bear and
+        ind["body"] > ind["avg_body"] * BODY_MULT and
+        ind["volume"] > ind["avg_vol"] * VOL_MULT and
+        ind["lower_wick"] < ind["body"] * 0.25 and
+        RSI_SELL_MIN <= ind["rsi"] <= RSI_SELL_MAX and
+        ind["close"] < ind["ema"]
     )
 
     return bull_confluence, bear_confluence
@@ -145,17 +142,13 @@ async def strategy_loop(client):
 
             if not active_position:
                 if bull:
-                    body = ind["body"]
-                    sl = ind["close"] - body * SL_MULT
-                    tp = ind["close"] + body * TP_MULT
+                    sl = ind["close"] - ind["body"] * SL_MULT
+                    tp = ind["close"] + ind["body"] * TP_MULT
                     await place_trade(client, "BUY", ind["close"], sl, tp)
-
                 elif bear:
-                    body = ind["body"]
-                    sl = ind["close"] + body * SL_MULT
-                    tp = ind["close"] - body * TP_MULT
+                    sl = ind["close"] + ind["body"] * SL_MULT
+                    tp = ind["close"] - ind["body"] * TP_MULT
                     await place_trade(client, "SELL", ind["close"], sl, tp)
-
         except Exception as e:
             print("Strategy Loop Error:", e)
 
@@ -171,10 +164,25 @@ async def ping_loop():
             print("Ping failed")
         await asyncio.sleep(600)
 
+async def health_server():
+    async def handle(request):
+        return web.Response(text="Bot is running.")
+
+    app = web.Application()
+    app.router.add_get('/ping', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+
 async def main():
     client = await AsyncClient.create(API_KEY, API_SECRET, testnet=True)
     client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-    await asyncio.gather(strategy_loop(client), ping_loop())
+    await asyncio.gather(
+        strategy_loop(client),
+        ping_loop(),
+        health_server()
+    )
 
 if __name__ == '__main__':
     try:
