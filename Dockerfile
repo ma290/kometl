@@ -13,4 +13,4 @@ RUN pip install --no-cache-dir \
 
 EXPOSE 8080
 
-CMD ["python", "trade_bot.py"]
+CMD ["python", "main.py"]
