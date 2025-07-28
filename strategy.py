@@ -17,7 +17,7 @@ SL_MULT = float(os.getenv("SL_MULT", 1.0))
 TP_MULT = float(os.getenv("TP_MULT", 2.0))
 BODY_STRENGTH_MULT = float(os.getenv("BODY_STRENGTH", 0.1))
 VOLUME_STRENGTH_MULT = float(os.getenv("VOLUME_STRENGTH", 0.1))
-TRAIL_OFFSET = float(os.getenv("TRAIL_OFFSET", 0.0)) / 100.0
+TRAIL_OFFSET = float(os.getenv("TRAIL_OFFSET", 0.5)) / 100.0
 TRADE_QTY = float(os.getenv("TRADE_QTY", 0.01))
 
 def fetch_klines(symbol, interval="1m", limit=100):
